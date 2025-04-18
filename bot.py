@@ -3,6 +3,7 @@ import logging
 import psycopg2
 import re
 import time
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -19,9 +20,9 @@ import math
 import uuid
 from datetime import datetime, timedelta
 
-# Enable logging
+# Enable detailed logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,15 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")  # Set in Railway variables
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 # Database connection
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    try:
+        return psycopg2.connect(DATABASE_URL)
+    except Exception as e:
+        logger.error(f"Database connection failed: {e}")
+        raise
 
 # Initialize database tables
 def init_db():
@@ -66,6 +71,7 @@ def init_db():
                 );
             """)
             conn.commit()
+    logger.info("Database initialized")
 
 # Validate URL
 def validate_url(url):
@@ -104,10 +110,14 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, query=No
         [InlineKeyboardButton("Info", callback_data="menu_info")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    if query:
-        await query.message.reply_text("Choose an action:", reply_markup=reply_markup)
-    elif update.message:
-        await update.message.reply_text("Choose an action:", reply_markup=reply_markup)
+    try:
+        if query:
+            await query.message.reply_text("Choose an action:", reply_markup=reply_markup)
+        elif update.message:
+            await update.message.reply_text("Choose an action:", reply_markup=reply_markup)
+        logger.debug("Menu displayed")
+    except Exception as e:
+        logger.error(f"Error displaying menu: {e}")
 
 # Command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,6 +125,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Welcome to VideoDownloaderBot! Send a video, audio, or image URL from any platform (e.g., YouTube, Instagram), or use the menu below."
     )
     await show_menu(update, context)
+    logger.info(f"Start command by user {update.message.from_user.id}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
@@ -147,118 +158,151 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     await update.message.reply_text(help_text)
     await show_menu(update, context)
+    logger.info(f"Help command by user {update.message.from_user.id}")
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     args = context.args
     platform = args[0].lower() if args else None
 
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            if platform:
-                cur.execute(
-                    "SELECT url, selected_quality, media_type, timestamp FROM user_history WHERE user_id = %s AND platform = %s ORDER BY timestamp DESC LIMIT 10",
-                    (user_id, platform)
-                )
-            else:
-                cur.execute(
-                    "SELECT url, selected_quality, media_type, timestamp FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 10",
-                    (user_id,)
-                )
-            rows = cur.fetchall()
-    if rows:
-        history_text = f"Your recent downloads ({platform or 'all platforms'}):\n"
-        for row in rows:
-            history_text += f"URL: {row[0]}\nQuality: {row[1]}\nType: {row[2]}\nTime: {row[3]}\n\n"
-    else:
-        history_text = f"No download history found for {platform or 'all platforms'}."
-    await update.message.reply_text(history_text)
-    await show_menu(update, context)
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                if platform:
+                    cur.execute(
+                        "SELECT url, selected_quality, media_type, timestamp FROM user_history WHERE user_id = %s AND platform = %s ORDER BY timestamp DESC LIMIT 10",
+                        (user_id, platform)
+                    )
+                else:
+                    cur.execute(
+                        "SELECT url, selected_quality, media_type, timestamp FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 10",
+                        (user_id,)
+                    )
+                rows = cur.fetchall()
+        if rows:
+            history_text = f"Your recent downloads ({platform or 'all platforms'}):\n"
+            for row in rows:
+                history_text += f"URL: {row[0]}\nQuality: {row[1]}\nType: {row[2]}\nTime: {row[3]}\n\n"
+        else:
+            history_text = f"No download history found for {platform or 'all platforms'}."
+        await update.message.reply_text(history_text)
+        await show_menu(update, context)
+        logger.info(f"History command by user {user_id} for platform {platform or 'all'}")
+    except Exception as e:
+        logger.error(f"Error fetching history: {e}")
+        await update.message.reply_text("Error fetching history. Please try again.")
+        await show_menu(update, context)
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM user_history WHERE user_id = %s",
-                (user_id,)
-            )
-            conn.commit()
-            cur.execute(
-                "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
-                (user_id,)
-            )
-            count = cur.fetchone()[0]
-    if count == 0:
-        await update.message.reply_text("Your history has been cleared.")
-    else:
-        await update.message.reply_text("Failed to clear history. Please try again.")
-    await show_menu(update, context)
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM user_history WHERE user_id = %s",
+                    (user_id,)
+                )
+                conn.commit()
+                cur.execute(
+                    "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
+                    (user_id,)
+                )
+                count = cur.fetchone()[0]
+        if count == 0:
+            await update.message.reply_text("Your history has been cleared.")
+        else:
+            await update.message.reply_text("Failed to clear history. Please try again.")
+        await show_menu(update, context)
+        logger.info(f"Clear history command by user {user_id}")
+    except Exception as e:
+        logger.error(f"Error clearing history: {e}")
+        await update.message.reply_text("Error clearing history. Please try again.")
+        await show_menu(update, context)
 
 async def export_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT url, selected_quality, media_type, platform, timestamp FROM user_history WHERE user_id = %s ORDER BY timestamp DESC",
-                (user_id,)
-            )
-            rows = cur.fetchall()
-    if rows:
-        history_text = "Your download history:\n\n"
-        for row in rows:
-            history_text += f"URL: {row[0]}\nQuality: {row[1]}\nType: {row[2]}\nPlatform: {row[3]}\nTime: {row[4]}\n\n"
-    else:
-        history_text = "No download history found."
-    await update.message.reply_text(history_text)
-    await show_menu(update, context)
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT url, selected_quality, media_type, platform, timestamp FROM user_history WHERE user_id = %s ORDER BY timestamp DESC",
+                    (user_id,)
+                )
+                rows = cur.fetchall()
+        if rows:
+            history_text = "Your download history:\n\n"
+            for row in rows:
+                history_text += f"URL: {row[0]}\nQuality: {row[1]}\nType: {row[2]}\nPlatform: {row[3]}\nTime: {row[4]}\n\n"
+        else:
+            history_text = "No download history found."
+        await update.message.reply_text(history_text)
+        await show_menu(update, context)
+        logger.info(f"Export history command by user {user_id}")
+    except Exception as e:
+        logger.error(f"Error exporting history: {e}")
+        await update.message.reply_text("Error exporting history. Please try again.")
+        await show_menu(update, context)
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
-                (user_id,)
-            )
-            total_downloads = cur.fetchone()[0]
-            cur.execute(
-                "SELECT platform, COUNT(*) FROM user_history WHERE user_id = %s GROUP BY platform",
-                (user_id,)
-            )
-            platform_counts = cur.fetchall()
-    stats_text = f"Your stats:\nTotal Downloads: {total_downloads}\n"
-    for platform, count in platform_counts:
-        stats_text += f"{platform.capitalize()}: {count}\n"
-    await update.message.reply_text(stats_text)
-    await show_menu(update, context)
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
+                    (user_id,)
+                )
+                total_downloads = cur.fetchone()[0]
+                cur.execute(
+                    "SELECT platform, COUNT(*) FROM user_history WHERE user_id = %s GROUP BY platform",
+                    (user_id,)
+                )
+                platform_counts = cur.fetchall()
+        stats_text = f"Your stats:\nTotal Downloads: {total_downloads}\n"
+        for platform, count in platform_counts:
+            stats_text += f"{platform.capitalize()}: {count}\n"
+        await update.message.reply_text(stats_text)
+        await show_menu(update, context)
+        logger.info(f"Stats command by user {user_id}")
+    except Exception as e:
+        logger.error(f"Error fetching stats: {e}")
+        await update.message.reply_text("Error fetching stats. Please try again.")
+        await show_menu(update, context)
 
 async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     feedback_text = " ".join(context.args) if context.args else ""
     if not feedback_text:
         await update.message.reply_text("Please provide feedback. Example: /feedback Great bot!")
+        await show_menu(update, context)
         return
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO interactions (user_id, video_url, selected_quality) VALUES (%s, %s, %s)",
-                (user_id, "feedback", feedback_text)
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO interactions (user_id, video_url, selected_quality) VALUES (%s, %s, %s)",
+                    (user_id, "feedback", feedback_text)
+                )
+                conn.commit()
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"Feedback from user {user_id}:\n{feedback_text}"
             )
-            conn.commit()
-    if ADMIN_CHAT_ID:
-        await context.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text=f"Feedback from user {user_id}:\n{feedback_text}"
-        )
-    await update.message.reply_text("Thank you for your feedback!")
-    await show_menu(update, context)
+        await update.message.reply_text("Thank you for your feedback!")
+        await show_menu(update, context)
+        logger.info(f"Feedback from user {user_id}: {feedback_text}")
+    except Exception as e:
+        logger.error(f"Error processing feedback: {e}")
+        await update.message.reply_text("Error sending feedback. Please try again.")
+        await show_menu(update, context)
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now() - context.bot_data.get("start_time", datetime.now())
-    info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier"
+    info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18"
     await update.message.reply_text(info_text)
     await show_menu(update, context)
+    logger.info(f"Info command by user {update.message.from_user.id}")
 
 # Handle video/audio/image URLs
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -267,26 +311,34 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     urls = [url.strip() for url in re.split(r"[\n,]", text) if url.strip()]
 
     # Rate limiting: 10 downloads/hour per user
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            one_hour_ago = datetime.now() - timedelta(hours=1)
-            cur.execute(
-                "SELECT COUNT(*) FROM interactions WHERE user_id = %s AND timestamp > %s",
-                (user_id, one_hour_ago)
-            )
-            recent_downloads = cur.fetchone()[0]
-            if recent_downloads >= 10:
-                await update.message.reply_text(
-                    "Rate limit exceeded. Please wait an hour before downloading more."
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                one_hour_ago = datetime.now() - timedelta(hours=1)
+                cur.execute(
+                    "SELECT COUNT(*) FROM interactions WHERE user_id = %s AND timestamp > %s",
+                    (user_id, one_hour_ago)
                 )
-                await show_menu(update, context)
-                return
+                recent_downloads = cur.fetchone()[0]
+                if recent_downloads >= 10:
+                    await update.message.reply_text(
+                        "Rate limit exceeded. Please wait an hour before downloading more."
+                    )
+                    await show_menu(update, context)
+                    logger.info(f"Rate limit hit for user {user_id}")
+                    return
+    except Exception as e:
+        logger.error(f"Error checking rate limit: {e}")
+        await update.message.reply_text("Error checking rate limit. Please try again.")
+        await show_menu(update, context)
+        return
 
     for url in urls:
         if not validate_url(url):
             await update.message.reply_text(
                 f"Unsupported URL: {url}. Please use URLs from YouTube, Instagram, Twitter, TikTok, or Vimeo."
             )
+            logger.warning(f"Unsupported URL from user {user_id}: {url}")
             continue
 
         platform = get_platform(url)
@@ -299,13 +351,17 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
         # Log interaction
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO interactions (user_id, video_url) VALUES (%s, %s)",
-                    (user_id, url)
-                )
-                conn.commit()
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO interactions (user_id, video_url) VALUES (%s, %s)",
+                        (user_id, url)
+                    )
+                    conn.commit()
+            logger.debug(f"Logged interaction for user {user_id}, URL: {url}")
+        except Exception as e:
+            logger.error(f"Error logging interaction: {e}")
 
         # Fetch media info with yt-dlp
         try:
@@ -318,6 +374,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "geo_bypass": True,
                 "no_playlist": True,
                 "retries": 3,
+                "extractor_retries": 3,
             }
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -341,23 +398,27 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "Select media type to download:", reply_markup=reply_markup
             )
+            logger.info(f"Media type selection for user {user_id}, URL: {url}")
 
         except Exception as e:
             logger.error(f"Error processing URL {url}: {e}")
-            error_msg = f"Error processing {url}: {str(e)}. Try a different platform (e.g., Vimeo, Twitter)."
+            error_msg = f"Error processing {url}: {str(e)}. Try a different platform (e.g., Vimeo, Twitter) or a public URL."
             await update.message.reply_text(error_msg)
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO errors (user_id, error_message, url) VALUES (%s, %s, %s)",
-                        (user_id, str(e), url)
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO errors (user_id, error_message, url) VALUES (%s, %s, %s)",
+                            (user_id, str(e), url)
+                        )
+                        conn.commit()
+                if ADMIN_CHAT_ID:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=f"Error for user {user_id}: {str(e)}\nURL: {url}"
                     )
-                    conn.commit()
-            if ADMIN_CHAT_ID:
-                await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=f"Error for user {user_id}: {str(e)}\nURL: {url}"
-                )
+            except Exception as db_e:
+                logger.error(f"Error logging error to database: {db_e}")
             del context.bot_data[request_id]
 
     await show_menu(update, context)
@@ -371,108 +432,107 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data.split("|")
     action = data[0]
 
-    logger.info(f"Received callback: {query.data}")
+    logger.debug(f"Received callback from user {user_id}: {query.data}")
 
     if action == "menu":
         command = data[1]
-        logger.info(f"Processing menu command: {command}")
-        if command == "start":
-            await query.message.reply_text(
-                "Welcome to VideoDownloaderBot! Send a video, audio, or image URL from any platform (e.g., YouTube, Instagram), or use the menu below."
-            )
-            await show_menu(update, context, query)
-        elif command == "help":
-            help_text = """
-            **VideoDownloaderBot User Guide**
+        logger.info(f"Processing menu command: {command} for user {user_id}")
+        try:
+            if command == "start":
+                await query.message.reply_text(
+                    "Welcome to VideoDownloaderBot! Send a video, audio, or image URL from any platform (e.g., YouTube, Instagram), or use the menu below."
+                )
+            elif command == "help":
+                help_text = """
+                **VideoDownloaderBot User Guide**
 
-            Send a URL to download videos, audio, or images from platforms like YouTube, Instagram, Twitter, etc.
+                Send a URL to download videos, audio, or images from platforms like YouTube, Instagram, Twitter, etc.
 
-            **Commands**:
-            - /start: Start the bot and show the menu.
-            - /help: Show this guide.
-            - /menu: Display the command menu.
-            - /history [platform]: View recent downloads (e.g., /history youtube).
-            - /clearhistory: Delete your download history.
-            - /exporthistory: Export history as a text message.
-            - /stats: Show usage statistics.
-            - /feedback: Send feedback to the admin.
-            - /info: Show bot status.
+                **Commands**:
+                - /start: Start the bot and show the menu.
+                - /help: Show this guide.
+                - /menu: Display the command menu.
+                - /history [platform]: View recent downloads (e.g., /history youtube).
+                - /clearhistory: Delete your download history.
+                - /exporthistory: Export history as a text message.
+                - /stats: Show usage statistics.
+                - /feedback: Send feedback to the admin.
+                - /info: Show bot status.
 
-            **Examples**:
-            - Send: `https://www.youtube.com/watch?v=dQw4w9WgXcQ`
-            - Send: `/history instagram` to see Instagram downloads.
-            - Send: `/exporthistory` to get a history summary.
+                **Examples**:
+                - Send: `https://www.youtube.com/watch?v=dQw4w9WgXcQ`
+                - Send: `/history instagram` to see Instagram downloads.
+                - Send: `/exporthistory` to get a history summary.
 
-            **Features**:
-            - Choose video quality with buttons.
-            - For large videos (>50 MB), select direct link or split into parts.
-            - Supports batch URLs (separate with commas or newlines).
-            - Cancel downloads with the "Cancel" button.
-            - Filter and export download history.
-            """
-            await query.message.reply_text(help_text)
+                **Features**:
+                - Choose video quality with buttons.
+                - For large videos (>50 MB), select direct link or split into parts.
+                - Supports batch URLs (separate with commas or newlines).
+                - Cancel downloads with the "Cancel" button.
+                - Filter and export download history.
+                """
+                await query.message.reply_text(help_text)
+            elif command == "history":
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT url, selected_quality, media_type, timestamp FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 10",
+                            (user_id,)
+                        )
+                        rows = cur.fetchall()
+                if rows:
+                    history_text = "Your recent downloads:\n"
+                    for row in rows:
+                        history_text += f"URL: {row[0]}\nQuality: {row[1]}\nType: {row[2]}\nTime: {row[3]}\n\n"
+                else:
+                    history_text = "No download history found."
+                await query.message.reply_text(history_text)
+            elif command == "clearhistory":
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM user_history WHERE user_id = %s",
+                            (user_id,)
+                        )
+                        conn.commit()
+                        cur.execute(
+                            "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
+                            (user_id,)
+                        )
+                        count = cur.fetchone()[0]
+                if count == 0:
+                    await query.message.reply_text("Your history has been cleared.")
+                else:
+                    await query.message.reply_text("Failed to clear history. Please try again.")
+            elif command == "stats":
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
+                            (user_id,)
+                        )
+                        total_downloads = cur.fetchone()[0]
+                        cur.execute(
+                            "SELECT platform, COUNT(*) FROM user_history WHERE user_id = %s GROUP BY platform",
+                            (user_id,)
+                        )
+                        platform_counts = cur.fetchall()
+                stats_text = f"Your stats:\nTotal Downloads: {total_downloads}\n"
+                for platform, count in platform_counts:
+                    stats_text += f"{platform.capitalize()}: {count}\n"
+                await query.message.reply_text(stats_text)
+            elif command == "feedback":
+                await query.message.reply_text(
+                    "Please send feedback using: /feedback Your message"
+                )
+            elif command == "info":
+                uptime = datetime.now() - context.bot_data.get("start_time", datetime.now())
+                info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18"
+                await query.message.reply_text(info_text)
             await show_menu(update, context, query)
-        elif command == "history":
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT url, selected_quality, media_type, timestamp FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 10",
-                        (user_id,)
-                    )
-                    rows = cur.fetchall()
-            if rows:
-                history_text = "Your recent downloads:\n"
-                for row in rows:
-                    history_text += f"URL: {row[0]}\nQuality: {row[1]}\nType: {row[2]}\nTime: {row[3]}\n\n"
-            else:
-                history_text = "No download history found."
-            await query.message.reply_text(history_text)
-            await show_menu(update, context, query)
-        elif command == "clearhistory":
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM user_history WHERE user_id = %s",
-                        (user_id,)
-                    )
-                    conn.commit()
-                    cur.execute(
-                        "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
-                        (user_id,)
-                    )
-                    count = cur.fetchone()[0]
-            if count == 0:
-                await query.message.reply_text("Your history has been cleared.")
-            else:
-                await query.message.reply_text("Failed to clear history. Please try again.")
-            await show_menu(update, context, query)
-        elif command == "stats":
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
-                        (user_id,)
-                    )
-                    total_downloads = cur.fetchone()[0]
-                    cur.execute(
-                        "SELECT platform, COUNT(*) FROM user_history WHERE user_id = %s GROUP BY platform",
-                        (user_id,)
-                    )
-                    platform_counts = cur.fetchall()
-            stats_text = f"Your stats:\nTotal Downloads: {total_downloads}\n"
-            for platform, count in platform_counts:
-                stats_text += f"{platform.capitalize()}: {count}\n"
-            await query.message.reply_text(stats_text)
-            await show_menu(update, context, query)
-        elif command == "feedback":
-            await query.message.reply_text(
-                "Please send feedback using: /feedback Your message"
-            )
-            await show_menu(update, context, query)
-        elif command == "info":
-            uptime = datetime.now() - context.bot_data.get("start_time", datetime.now())
-            info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier"
-            await query.message.reply_text(info_text)
+        except Exception as e:
+            logger.error(f"Error processing menu command {command}: {e}")
+            await query.message.reply_text("Error processing command. Please try again.")
             await show_menu(update, context, query)
 
     elif action == "media":
@@ -480,6 +540,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if request_id not in context.bot_data:
             await query.message.reply_text("Session expired. Please send the URL again.")
             await show_menu(update, context, query)
+            logger.warning(f"Session expired for request_id {request_id}")
             return
 
         url = context.bot_data[request_id]["url"]
@@ -496,6 +557,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "geo_bypass": True,
                     "no_playlist": True,
                     "retries": 3,
+                    "extractor_retries": 3,
                 }
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
@@ -507,10 +569,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
                 if not video_formats:
                     await query.message.reply_text(
-                        "No downloadable video formats found. Try audio or image, or use a different URL."
+                        "No downloadable video formats found. Try audio or image, or use a public URL."
                     )
                     del context.bot_data[request_id]
                     await show_menu(update, context, query)
+                    logger.warning(f"No video formats for URL {url}")
                     return
 
                 keyboard = []
@@ -529,23 +592,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Select a video quality:", reply_markup=reply_markup
                 )
                 await show_menu(update, context, query)
+                logger.info(f"Video quality selection for user {user_id}, URL: {url}")
 
             except Exception as e:
                 logger.error(f"Error processing video {url}: {e}")
-                error_msg = f"Error processing video: {str(e)}. Try audio or image, or use a different URL."
+                error_msg = f"Error processing video: {str(e)}. Try audio or image, or use a public URL."
                 await query.message.reply_text(error_msg)
-                with get_db_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "INSERT INTO errors (user_id, error_message, url) VALUES (%s, %s, %s)",
-                            (user_id, str(e), url)
+                try:
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "INSERT INTO errors (user_id, error_message, url) VALUES (%s, %s, %s)",
+                                (user_id, str(e), url)
+                            )
+                            conn.commit()
+                    if ADMIN_CHAT_ID:
+                        await context.bot.send_message(
+                            chat_id=ADMIN_CHAT_ID,
+                            text=f"Error for user {user_id}: {str(e)}\nURL: {url}"
                         )
-                        conn.commit()
-                if ADMIN_CHAT_ID:
-                    await context.bot.send_message(
-                        chat_id=ADMIN_CHAT_ID,
-                        text=f"Error for user {user_id}: {str(e)}\nURL: {url}"
-                    )
+                except Exception as db_e:
+                    logger.error(f"Error logging error to database: {db_e}")
                 del context.bot_data[request_id]
                 await show_menu(update, context, query)
 
@@ -560,6 +627,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "geo_bypass": True,
                     "no_playlist": True,
                     "retries": 3,
+                    "extractor_retries": 3,
                 }
                 start_time = time.time()
                 timeout = 30  # seconds
@@ -578,6 +646,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.message.reply_text("Error: Audio file not found.")
                     del context.bot_data[request_id]
                     await show_menu(update, context, query)
+                    logger.warning(f"No audio file for URL {url}")
                     return
 
                 if context.bot_data[request_id]["cancelled"]:
@@ -585,6 +654,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     os.remove(audio_file)
                     del context.bot_data[request_id]
                     await show_menu(update, context, query)
+                    logger.info(f"Audio download cancelled for user {user_id}")
                     return
 
                 file_size = os.path.getsize(audio_file) / (1024 * 1024)  # MB
@@ -599,29 +669,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(audio_file)
 
                 # Log to history
-                with get_db_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "INSERT INTO user_history (user_id, url, selected_quality, media_type, platform) VALUES (%s, %s, %s, %s, %s)",
-                            (user_id, url, "audio", "audio", platform)
-                        )
-                        cur.execute(
-                            "DELETE FROM user_history WHERE user_id = %s AND id NOT IN (SELECT id FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 100)",
-                            (user_id, user_id)
-                        )
-                        conn.commit()
+                try:
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "INSERT INTO user_history (user_id, url, selected_quality, media_type, platform) VALUES (%s, %s, %s, %s, %s)",
+                                (user_id, url, "audio", "audio", platform)
+                            )
+                            cur.execute(
+                                "DELETE FROM user_history WHERE user_id = %s AND id NOT IN (SELECT id FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 100)",
+                                (user_id, user_id)
+                            )
+                            conn.commit()
+                except Exception as e:
+                    logger.error(f"Error logging audio history: {e}")
 
                 await progress_msg.delete()
                 await query.message.reply_text("Audio download complete!")
                 del context.bot_data[request_id]
                 await show_menu(update, context, query)
+                logger.info(f"Audio download complete for user {user_id}, URL: {url}")
 
             except Exception as e:
                 logger.error(f"Error downloading audio: {e}")
                 await query.message.reply_text(
-                    f"Error downloading audio: {str(e)}. Try a different URL."
+                    f"Error downloading audio: {str(e)}. Try a public URL."
                 )
-                os.remove("audio.mp3") if os.path.exists("audio.mp3") else None
+                for file in os.listdir():
+                    if file.startswith("audio."):
+                        os.remove(file)
                 del context.bot_data[request_id]
                 await show_menu(update, context, query)
 
@@ -629,6 +705,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 ydl_opts = {
                     "write_thumbnail": True,
+                    "skip_download": True,  # Only download thumbnail
                     "outtmpl": "image.%(ext)s",
                     "quiet": True,
                     "no-check-certificate": True,
@@ -636,6 +713,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "geo_bypass": True,
                     "no_playlist": True,
                     "retries": 3,
+                    "extractor_retries": 3,
                 }
                 start_time = time.time()
                 timeout = 30  # seconds
@@ -651,9 +729,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         break
 
                 if not image_file:
-                    await query.message.reply_text("Error: No image found. Ensure the URL contains a downloadable image (e.g., Instagram post).")
+                    await query.message.reply_text(
+                        "Error: No image found. Ensure the URL is a public post with a single image (e.g., Instagram post)."
+                    )
                     del context.bot_data[request_id]
                     await show_menu(update, context, query)
+                    logger.warning(f"No image file for URL {url}")
                     return
 
                 if context.bot_data[request_id]["cancelled"]:
@@ -661,6 +742,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     os.remove(image_file)
                     del context.bot_data[request_id]
                     await show_menu(update, context, query)
+                    logger.info(f"Image download cancelled for user {user_id}")
                     return
 
                 file_size = os.path.getsize(image_file) / (1024 * 1024)  # MB
@@ -675,27 +757,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(image_file)
 
                 # Log to history
-                with get_db_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "INSERT INTO user_history (user_id, url, selected_quality, media_type, platform) VALUES (%s, %s, %s, %s, %s)",
-                            (user_id, url, "image", "image", platform)
-                        )
-                        cur.execute(
-                            "DELETE FROM user_history WHERE user_id = %s AND id NOT IN (SELECT id FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 100)",
-                            (user_id, user_id)
-                        )
-                        conn.commit()
+                try:
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "INSERT INTO user_history (user_id, url, selected_quality, media_type, platform) VALUES (%s, %s, %s, %s, %s)",
+                                (user_id, url, "image", "image", platform)
+                            )
+                            cur.execute(
+                                "DELETE FROM user_history WHERE user_id = %s AND id NOT IN (SELECT id FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 100)",
+                                (user_id, user_id)
+                            )
+                            conn.commit()
+                except Exception as e:
+                    logger.error(f"Error logging image history: {e}")
 
                 await progress_msg.delete()
                 await query.message.reply_text("Image download complete!")
                 del context.bot_data[request_id]
                 await show_menu(update, context, query)
+                logger.info(f"Image download complete for user {user_id}, URL: {url}")
 
             except Exception as e:
                 logger.error(f"Error downloading image: {e}")
                 await query.message.reply_text(
-                    f"Error downloading image: {str(e)}. Ensure the URL contains a downloadable image (e.g., Instagram post)."
+                    f"Error downloading image: {str(e)}. Ensure the URL is a public post with a single image (e.g., Instagram post)."
                 )
                 for file in os.listdir():
                     if file.startswith("image.") and file.endswith((".jpg", ".png", ".jpeg")):
@@ -708,27 +794,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if request_id not in context.bot_data:
             await query.message.reply_text("Session expired. Please send the URL again.")
             await show_menu(update, context, query)
+            logger.warning(f"Session expired for request_id {request_id}")
             return
 
         url = context.bot_data[request_id]["url"]
         platform = context.bot_data[request_id]["platform"]
 
         # Log selected quality
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE interactions SET selected_quality = %s, media_type = %s WHERE user_id = %s AND video_url = %s",
-                    (format_id, media_type, user_id, url)
-                )
-                cur.execute(
-                    "INSERT INTO user_history (user_id, url, selected_quality, media_type, platform) VALUES (%s, %s, %s, %s, %s)",
-                    (user_id, url, format_id, media_type, platform)
-                )
-                cur.execute(
-                    "DELETE FROM user_history WHERE user_id = %s AND id NOT IN (SELECT id FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 100)",
-                    (user_id, user_id)
-                )
-                conn.commit()
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE interactions SET selected_quality = %s, media_type = %s WHERE user_id = %s AND video_url = %s",
+                        (format_id, media_type, user_id, url)
+                    )
+                    cur.execute(
+                        "INSERT INTO user_history (user_id, url, selected_quality, media_type, platform) VALUES (%s, %s, %s, %s, %s)",
+                        (user_id, url, format_id, media_type, platform)
+                    )
+                    cur.execute(
+                        "DELETE FROM user_history WHERE user_id = %s AND id NOT IN (SELECT id FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 100)",
+                        (user_id, user_id)
+                    )
+                    conn.commit()
+        except Exception as e:
+            logger.error(f"Error logging quality selection: {e}")
 
         # Download video
         try:
@@ -741,6 +831,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "geo_bypass": True,
                 "no_playlist": True,
                 "retries": 3,
+                "extractor_retries": 3,
             }
             start_time = time.time()
             timeout = 30  # seconds
@@ -765,6 +856,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del context.bot_data[request_id]
                 await progress_msg.delete()
                 await show_menu(update, context, query)
+                logger.warning(f"No video file for URL {url}")
                 return
 
             if context.bot_data[request_id]["cancelled"]:
@@ -773,6 +865,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del context.bot_data[request_id]
                 await progress_msg.delete()
                 await show_menu(update, context, query)
+                logger.info(f"Video download cancelled for user {user_id}")
                 return
 
             file_size = os.path.getsize(video_file) / (1024 * 1024)  # Size in MB
@@ -808,24 +901,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(video_file)
                 await progress_msg.delete()
 
+            del context.bot_data[request_id]
+            await show_menu(update, context, query)
+            logger.info(f"Video download complete for user {user_id}, URL: {url}")
+
         except Exception as e:
             logger.error(f"Error downloading video: {e}")
             await query.message.reply_text(
                 f"Error downloading video: {str(e)}. Try a lower quality or a different platform (e.g., Vimeo, Twitter)."
             )
-            os.remove("video.mp4") if os.path.exists("video.mp4") else None
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO errors (user_id, error_message, url) VALUES (%s, %s, %s)",
-                        (user_id, str(e), url)
+            for file in os.listdir():
+                if file.startswith("video."):
+                    os.remove(file)
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO errors (user_id, error_message, url) VALUES (%s, %s, %s)",
+                            (user_id, str(e), url)
+                        )
+                        conn.commit()
+                if ADMIN_CHAT_ID:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=f"Error for user {user_id}: {str(e)}\nURL: {url}"
                     )
-                    conn.commit()
-            if ADMIN_CHAT_ID:
-                await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=f"Error for user {user_id}: {str(e)}\nURL: {url}"
-                )
+            except Exception as db_e:
+                logger.error(f"Error logging error to database: {db_e}")
             del context.bot_data[request_id]
             await progress_msg.delete()
             await show_menu(update, context, query)
@@ -835,6 +937,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if request_id not in context.bot_data:
             await query.message.reply_text("Session expired. Please send the URL again.")
             await show_menu(update, context, query)
+            logger.warning(f"Session expired for request_id {request_id}")
             return
 
         url = context.bot_data[request_id]["url"]
@@ -846,6 +949,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "geo_bypass": True,
                 "no_playlist": True,
                 "retries": 3,
+                "extractor_retries": 3,
             }
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -857,6 +961,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         break
             del context.bot_data[request_id]
             await show_menu(update, context, query)
+            logger.info(f"Direct link provided for user {user_id}, URL: {url}")
 
         except Exception as e:
             logger.error(f"Error fetching link: {e}")
@@ -871,6 +976,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if request_id not in context.bot_data:
             await query.message.reply_text("Session expired. Please send the URL again.")
             await show_menu(update, context, query)
+            logger.warning(f"Session expired for request_id {request_id}")
             return
 
         url = context.bot_data[request_id]["url"]
@@ -885,6 +991,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "geo_bypass": True,
                 "no_playlist": True,
                 "retries": 3,
+                "extractor_retries": 3,
             }
             start_time = time.time()
             timeout = 30  # seconds
@@ -909,6 +1016,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del context.bot_data[request_id]
                 await progress_msg.delete()
                 await show_menu(update, context, query)
+                logger.warning(f"No video file for URL {url}")
                 return
 
             if context.bot_data[request_id]["cancelled"]:
@@ -917,6 +1025,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 del context.bot_data[request_id]
                 await progress_msg.delete()
                 await show_menu(update, context, query)
+                logger.info(f"Video splitting cancelled for user {user_id}")
                 return
 
             # Split video into parts (each <50 MB)
@@ -945,33 +1054,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Video splitting complete!")
             del context.bot_data[request_id]
             await show_menu(update, context, query)
+            logger.info(f"Video splitting complete for user {user_id}, URL: {url}")
 
         except Exception as e:
             logger.error(f"Error splitting video: {e}")
             await query.message.reply_text(
                 f"Error splitting video: {str(e)}. Try a direct link or a different URL."
             )
-            os.remove("video.mp4") if os.path.exists("video.mp4") else None
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO user_history (user_id, url, selected_quality, media_type, platform) VALUES (%s, %s, %s, %s, %s)",
-                        (user_id, url, format_id, "video", platform)
+            for file in os.listdir():
+                if file.startswith("video."):
+                    os.remove(file)
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO user_history (user_id, url, selected_quality, media_type, platform) VALUES (%s, %s, %s, %s, %s)",
+                            (user_id, url, format_id, "video", platform)
+                        )
+                        cur.execute(
+                            "DELETE FROM user_history WHERE user_id = %s AND id NOT IN (SELECT id FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 100)",
+                            (user_id, user_id)
+                        )
+                        cur.execute(
+                            "INSERT INTO errors (user_id, error_message, url) VALUES (%s, %s, %s)",
+                            (user_id, str(e), url)
+                        )
+                        conn.commit()
+                if ADMIN_CHAT_ID:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=f"Error for user {user_id}: {str(e)}\nURL: {url}"
                     )
-                    cur.execute(
-                        "DELETE FROM user_history WHERE user_id = %s AND id NOT IN (SELECT id FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 100)",
-                        (user_id, user_id)
-                    )
-                    cur.execute(
-                        "INSERT INTO errors (user_id, error_message, url) VALUES (%s, %s, %s)",
-                        (user_id, str(e), url)
-                    )
-                    conn.commit()
-            if ADMIN_CHAT_ID:
-                await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=f"Error for user {user_id}: {str(e)}\nURL: {url}"
-                )
+            except Exception as db_e:
+                logger.error(f"Error logging error to database: {db_e}")
             del context.bot_data[request_id]
             await progress_msg.delete()
             await show_menu(update, context, query)
@@ -982,17 +1097,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.bot_data[request_id]["cancelled"] = True
             await query.message.reply_text("Operation cancelled.")
             del context.bot_data[request_id]
+            logger.info(f"Operation cancelled for user {user_id}, request_id {request_id}")
         await show_menu(update, context, query)
+
+# Check for existing bot instances
+async def check_instance(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await context.bot.delete_webhook()
+        logger.info("Webhook cleared to prevent conflicts")
+    except Exception as e:
+        logger.error(f"Error clearing webhook: {e}")
+        if ADMIN_CHAT_ID:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"Error clearing webhook: {str(e)}. Multiple bot instances may be running."
+            )
 
 def main():
     # Initialize database
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        return
 
     # Create the Application
-    application = Application.builder().token(TOKEN).build()
+    try:
+        application = Application.builder().token(TOKEN).build()
+    except Exception as e:
+        logger.error(f"Failed to create application: {e}")
+        return
 
     # Store start time
     application.bot_data["start_time"] = datetime.now()
+
+    # Check for existing instances
+    application.job_queue.run_once(check_instance, 0)
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
@@ -1008,7 +1148,16 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_callback))
 
     # Start the bot
-    application.run_polling()
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info("Bot started successfully")
+    except Exception as e:
+        logger.error(f"Error starting bot: {e}")
+        if ADMIN_CHAT_ID:
+            asyncio.run(context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"Error starting bot: {str(e)}. Check Railway logs."
+            ))
 
 if __name__ == "__main__":
     main()
