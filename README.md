@@ -1,44 +1,58 @@
-# Telegram Video Downloader Bot
+# Universal Video Downloader Telegram Bot 🎥🤖
 
-A Telegram bot to download videos, audio, and images from platforms like YouTube, Instagram, Twitter, TikTok, and Vimeo. Deployed on Railway's free tier.
+A Telegram bot that downloads videos from YouTube, Twitter, Instagram, TikTok, and more. Supports quality selection, inline menus, and videos larger than 50MB (sent in parts or via direct link).
 
-## Features
-- Download videos, audio, or images with quality selection.
-- Persistent inline menu for commands.
-- Batch URL processing.
-- Progress updates and cancel option.
-- History filtering and export.
-- Usage stats and admin error alerts.
-- Public access with rate limiting.
+---
 
-## Setup
-1. **Create a Telegram Bot**:
-   - Message `@BotFather` on Telegram, send `/newbot`, and get the bot token.
-2. **Set Up Railway**:
-   - Sign up at [railway.app](https://railway.app) with GitHub.
-   - Create a new project and add a PostgreSQL database.
-   - Copy the `DATABASE_URL` from the database variables.
-3. **Deploy the Bot**:
-   - Clone this repository.
-   - Update `.env` with:
+## 🚀 Features
 
-- Push to GitHub.
-- In Railway, add a new service from your GitHub repository.
-- Set environment variables in Railway’s Variables tab.
-- Deploy and check logs.
+- Download videos from **any major platform** using `yt-dlp`
+- Show **available video qualities** and let users choose
+- Handles **>50MB files**: ask user to choose parts or direct download link
+- Saves logs to PostgreSQL (user ID, URL, selected quality)
+- Inline button menu: `/start`, `/help`, `/history`, `/clearhistory`
+- Fully deployable on **Railway free tier**
 
-## Usage
-- Send a URL (e.g., `https://www.youtube.com/watch?v=dQw4w9WgXcQ`).
-- Use `/menu` to access commands.
-- View history with `/history youtube` or export with `/exporthistory`.
-- Send feedback with `/feedback Great bot!`.
+---
 
-## Development
-- Run tests: `python tests.py` (requires local Python setup).
-- Monitor Railway logs for errors.
-- Update `yt-dlp` options for new platforms.
+## 🧰 Tech Stack
 
-## Limitations
-- Railway free tier: 512 MB RAM, 1 GB storage, 500 hours/month.
-- Some YouTube videos may require authentication (not supported).
-- Telegram file size limits: 50 MB for videos/audio, 10 MB for images.
+- Python 🐍
+- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- PostgreSQL
+- Railway for free hosting
+- `ffmpeg` via Nixpacks
+
+---
+
+## ⚙️ Setup & Deploy (Railway)
+
+1. **Fork this repo & push it to GitHub**
+
+2. **Create Railway Project**
+   - Go to [Railway](https://railway.app/)
+   - Create a new project and select "Deploy from GitHub"
+
+3. **Add Environment Variables in Railway**
+   - `BOT_TOKEN`: Your Telegram bot token
+   - `DATABASE_URL`: Railway PostgreSQL database URL (auto-provided when you add PostgreSQL plugin)
+
+4. **Done!** Railway builds and deploys automatically 🎉
+
+---
+
+## 📦 Commands
+
+- `/start` — Show welcome and menu
+- `/menu` — Show inline button menu
+- `/help` — How to use
+- `/history` — View recent downloads
+- `/clearhistory` — Delete your download history
+
+---
+
+## 🧪 Run Tests
+
+```bash
+python tests.py
