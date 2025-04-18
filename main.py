@@ -53,15 +53,30 @@ def init_db():
             """)
             conn.commit()
 
+# Show menu with inline buttons
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Start", callback_data="menu_start")],
+        [InlineKeyboardButton("Help", callback_data="menu_help")],
+        [InlineKeyboardButton("History", callback_data="menu_history")],
+        [InlineKeyboardButton("Clear History", callback_data="menu_clearhistory")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    if update.callback_query:
+        await update.callback_query.message.reply_text("Choose an action:", reply_markup=reply_markup)
+    else:
+        await update.message.reply_text("Choose an action:", reply_markup=reply_markup)
+
 # Command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Welcome to VideoDownloaderBot! Send a video URL from any platform (e.g., YouTube, Instagram), and I'll help you download it."
+        "Welcome to VideoDownloaderBot! Send a video URL from any platform (e.g., YouTube, Instagram), or use the menu below."
     )
+    await show_menu(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Send a video URL, and I'll show available qualities. Choose one, and I'll send the video or offer options for large files. Use /history to see your past downloads."
+        "Send a video URL, and I'll show available qualities. Choose one, and I'll send the video or offer options for large files. Use /menu to see all commands."
     )
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -80,6 +95,25 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         history_text = "No download history found."
     await update.message.reply_text(history_text)
+
+async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM user_history WHERE user_id = %s",
+                (user_id,)
+            )
+            conn.commit()
+            cur.execute(
+                "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
+                (user_id,)
+            )
+            count = cur.fetchone()[0]
+    if count == 0:
+        await update.message.reply_text("Your history has been cleared.")
+    else:
+        await update.message.reply_text("Failed to clear history. Please try again.")
 
 # Handle video URLs
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -104,8 +138,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ydl_opts = {
             "quiet": True,
             "format": "best",
-            "no-check-certificate": True,  # For Instagram and other platforms
-            "cookiefile": None,  # No cookies for public access
+            "no-check-certificate": True,
+            "cookiefile": None,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "geo_bypass": True,
         }
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
@@ -117,7 +153,9 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if f.get("vcodec") != "none" and f.get("resolution") and f.get("url")
         ]
         if not video_formats:
-            await update.message.reply_text("No downloadable video formats found. The video may be private or restricted. Please try another URL.")
+            await update.message.reply_text(
+                "No downloadable video formats found. The video may be private, age-restricted, or require authentication. Please try another URL."
+            )
             del context.bot_data[request_id]
             return
 
@@ -133,7 +171,9 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton(resolution, callback_data=callback_data)])
         
         if not keyboard:
-            await update.message.reply_text("No valid video formats available due to data constraints. Please try another URL.")
+            await update.message.reply_text(
+                "No valid video formats available due to data constraints. Please try another URL."
+            )
             del context.bot_data[request_id]
             return
 
@@ -148,7 +188,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(error_msg)
         del context.bot_data[request_id]
 
-# Handle quality selection and large file options
+# Handle quality selection and menu callbacks
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -157,7 +197,51 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data.split("|")
     action = data[0]
 
-    if action == "quality":
+    if action == "menu":
+        command = data[1]
+        if command == "start":
+            await query.message.reply_text(
+                "Welcome to VideoDownloaderBot! Send a video URL from any platform (e.g., YouTube, Instagram), or use the menu below."
+            )
+            await show_menu(update, context)
+        elif command == "help":
+            await query.message.reply_text(
+                "Send a video URL, and I'll show available qualities. Choose one, and I'll send the video or offer options for large files. Use /menu to see all commands."
+            )
+        elif command == "history":
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT video_url, selected_quality, timestamp FROM user_history WHERE user_id = %s ORDER BY timestamp DESC LIMIT 10",
+                        (user_id,)
+                    )
+                    rows = cur.fetchall()
+            if rows:
+                history_text = "Your recent downloads:\n"
+                for row in rows:
+                    history_text += f"URL: {row[0]}\nQuality: {row[1]}\nTime: {row[2]}\n\n"
+            else:
+                history_text = "No download history found."
+            await query.message.reply_text(history_text)
+        elif command == "clearhistory":
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM user_history WHERE user_id = %s",
+                        (user_id,)
+                    )
+                    conn.commit()
+                    cur.execute(
+                        "SELECT COUNT(*) FROM user_history WHERE user_id = %s",
+                        (user_id,)
+                    )
+                    count = cur.fetchone()[0]
+            if count == 0:
+                await query.message.reply_text("Your history has been cleared.")
+            else:
+                await query.message.reply_text("Failed to clear history. Please try again.")
+
+    elif action == "quality":
         request_id, format_id = data[1], data[2]
         if request_id not in context.bot_data:
             await query.message.reply_text("Session expired. Please send the URL again.")
@@ -185,6 +269,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "outtmpl": "video.%(ext)s",
                 "quiet": True,
                 "no-check-certificate": True,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "geo_bypass": True,
             }
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
@@ -242,7 +328,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         video_url = context.bot_data[request_id]["video_url"]
         try:
-            ydl_opts = {"quiet": True, "no-check-certificate": True}
+            ydl_opts = {
+                "quiet": True,
+                "no-check-certificate": True,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "geo_bypass": True,
+            }
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
                 for f in info.get("formats", []):
@@ -272,6 +363,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "outtmpl": "video.%(ext)s",
                 "quiet": True,
                 "no-check-certificate": True,
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "geo_bypass": True,
             }
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
@@ -329,6 +422,8 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("history", history))
+    application.add_handler(CommandHandler("clearhistory", clear_history))
+    application.add_handler(CommandHandler("menu", show_menu))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     application.add_handler(CallbackQueryHandler(handle_callback))
 
