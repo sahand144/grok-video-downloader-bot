@@ -3,7 +3,6 @@ import logging
 import psycopg2
 import re
 import time
-import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -299,7 +298,7 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now() - context.bot_data.get("start_time", datetime.now())
-    info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18"
+    info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18-v2"
     await update.message.reply_text(info_text)
     await show_menu(update, context)
     logger.info(f"Info command by user {update.message.from_user.id}")
@@ -527,7 +526,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             elif command == "info":
                 uptime = datetime.now() - context.bot_data.get("start_time", datetime.now())
-                info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18"
+                info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18-v2"
                 await query.message.reply_text(info_text)
             await show_menu(update, context, query)
         except Exception as e:
@@ -1100,19 +1099,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Operation cancelled for user {user_id}, request_id {request_id}")
         await show_menu(update, context, query)
 
-# Check for existing bot instances
-async def check_instance(context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await context.bot.delete_webhook()
-        logger.info("Webhook cleared to prevent conflicts")
-    except Exception as e:
-        logger.error(f"Error clearing webhook: {e}")
-        if ADMIN_CHAT_ID:
-            await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=f"Error clearing webhook: {str(e)}. Multiple bot instances may be running."
-            )
-
 def main():
     # Initialize database
     try:
@@ -1131,8 +1117,20 @@ def main():
     # Store start time
     application.bot_data["start_time"] = datetime.now()
 
-    # Check for existing instances
-    application.job_queue.run_once(check_instance, 0)
+    # Clear webhook to prevent conflicts
+    try:
+        application.bot.delete_webhook()
+        logger.info("Webhook cleared to prevent conflicts")
+    except Exception as e:
+        logger.error(f"Error clearing webhook: {e}")
+        if ADMIN_CHAT_ID:
+            try:
+                application.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"Error clearing webhook: {str(e)}. Multiple bot instances may be running."
+                )
+            except Exception as send_e:
+                logger.error(f"Error sending admin alert: {send_e}")
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
@@ -1154,10 +1152,13 @@ def main():
     except Exception as e:
         logger.error(f"Error starting bot: {e}")
         if ADMIN_CHAT_ID:
-            asyncio.run(context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=f"Error starting bot: {str(e)}. Check Railway logs."
-            ))
+            try:
+                application.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=f"Error starting bot: {str(e)}. Check Railway logs."
+                )
+            except Exception as send_e:
+                logger.error(f"Error sending admin alert: {send_e}")
 
 if __name__ == "__main__":
     main()
