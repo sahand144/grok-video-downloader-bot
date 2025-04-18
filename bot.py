@@ -299,9 +299,8 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now() - context.bot_data.get("start_time", datetime.now())
-    info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18-v3"
-    await update.message.reply_text(info_text)
-    await show_menu(update, context)
+    info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18-v4"
+    await update.message.reply_text(info    await show_menu(update, context)
     logger.info(f"Info command by user {update.message.from_user.id}")
 
 # Handle video/audio/image URLs
@@ -527,7 +526,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             elif command == "info":
                 uptime = datetime.now() - context.bot_data.get("start_time", datetime.now())
-                info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18-v3"
+                info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18-v4"
                 await query.message.reply_text(info_text)
             await show_menu(update, context, query)
         except Exception as e:
@@ -1100,7 +1099,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Operation cancelled for user {user_id}, request_id {request_id}")
         await show_menu(update, context, query)
 
-async def main():
+def main():
     # Initialize database
     try:
         init_db()
@@ -1120,15 +1119,18 @@ async def main():
 
     # Clear webhook to prevent conflicts
     try:
-        await application.bot.delete_webhook()
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(application.bot.delete_webhook())
         logger.info("Webhook cleared to prevent conflicts")
     except Exception as e:
         logger.error(f"Error clearing webhook: {e}")
         if ADMIN_CHAT_ID:
             try:
-                await application.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=f"Error clearing webhook: {str(e)}. Multiple bot instances may be running."
+                loop.run_until_complete(
+                    application.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=f"Error clearing webhook: {str(e)}. Multiple bot instances may be running."
+                    )
                 )
             except Exception as send_e:
                 logger.error(f"Error sending admin alert: {send_e}")
@@ -1148,18 +1150,21 @@ async def main():
 
     # Start the bot
     try:
-        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
         logger.info("Bot started successfully")
     except Exception as e:
         logger.error(f"Error starting bot: {e}")
         if ADMIN_CHAT_ID:
             try:
-                await application.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=f"Error starting bot: {str(e)}. Check Railway logs."
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(
+                    application.bot.send_message(
+                        chat_id=ADMIN_CHAT_ID,
+                        text=f"Error starting bot: {str(e)}. Check Railway logs."
+                    )
                 )
             except Exception as send_e:
                 logger.error(f"Error sending admin alert: {send_e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
