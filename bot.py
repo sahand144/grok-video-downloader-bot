@@ -300,7 +300,7 @@ async def feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now() - context.bot_data.get("start_time", datetime.now())
     info_text = f"Bot Info:\nUptime: {uptime}\nStatus: Running on Railway free tier\nVersion: 2025-04-18-v4"
-    await update.message.reply_text(info    await show_menu(update, context)
+    await update.message.reply_text(info    await show_menu(update, context))
     logger.info(f"Info command by user {update.message.from_user.id}")
 
 # Handle video/audio/image URLs
