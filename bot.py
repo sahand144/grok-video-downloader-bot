@@ -307,7 +307,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 conn.commit()
 
-        # Fetch video info with yt-dlp
+        # Fetch media info with yt-dlp
         try:
             ydl_opts = {
                 "quiet": True,
@@ -316,6 +316,8 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "cookiefile": None,
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                 "geo_bypass": True,
+                "no_playlist": True,
+                "retries": 3,
             }
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -324,7 +326,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 duration = info.get("duration", 0)
                 estimated_size = info.get("filesize", 0) / (1024 * 1024) if info.get("filesize") else "Unknown"
 
-            # Show video details
+            # Show media details
             details_text = f"Title: {title}\nDuration: {duration//60}:{duration%60:02d} min\nEstimated Size: {estimated_size:.2f} MB (if known)"
             await update.message.reply_text(details_text)
 
@@ -342,7 +344,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         except Exception as e:
             logger.error(f"Error processing URL {url}: {e}")
-            error_msg = f"Error processing {url}: {str(e)}. Try a lower quality or a different platform."
+            error_msg = f"Error processing {url}: {str(e)}. Try a different platform (e.g., Vimeo, Twitter)."
             await update.message.reply_text(error_msg)
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -369,8 +371,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data.split("|")
     action = data[0]
 
+    logger.info(f"Received callback: {query.data}")
+
     if action == "menu":
         command = data[1]
+        logger.info(f"Processing menu command: {command}")
         if command == "start":
             await query.message.reply_text(
                 "Welcome to VideoDownloaderBot! Send a video, audio, or image URL from any platform (e.g., YouTube, Instagram), or use the menu below."
@@ -489,6 +494,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "cookiefile": None,
                     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                     "geo_bypass": True,
+                    "no_playlist": True,
+                    "retries": 3,
                 }
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
@@ -551,6 +558,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "no-check-certificate": True,
                     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                     "geo_bypass": True,
+                    "no_playlist": True,
+                    "retries": 3,
                 }
                 start_time = time.time()
                 timeout = 30  # seconds
@@ -619,28 +628,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif media_type == "image":
             try:
                 ydl_opts = {
-                    "format": "best",
+                    "write_thumbnail": True,
                     "outtmpl": "image.%(ext)s",
                     "quiet": True,
                     "no-check-certificate": True,
                     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                     "geo_bypass": True,
+                    "no_playlist": True,
+                    "retries": 3,
                 }
                 start_time = time.time()
                 timeout = 30  # seconds
                 progress_msg = await query.message.reply_text("Downloading image...")
 
                 with YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
+                    info = ydl.extract_info(url, download=True)
 
                 image_file = None
                 for file in os.listdir():
-                    if file.startswith("image."):
+                    if file.startswith("image.") and file.endswith((".jpg", ".png", ".jpeg")):
                         image_file = file
                         break
 
                 if not image_file:
-                    await query.message.reply_text("Error: Image file not found.")
+                    await query.message.reply_text("Error: No image found. Ensure the URL contains a downloadable image (e.g., Instagram post).")
                     del context.bot_data[request_id]
                     await show_menu(update, context, query)
                     return
@@ -684,9 +695,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Error downloading image: {e}")
                 await query.message.reply_text(
-                    f"Error downloading image: {str(e)}. Try a different URL."
+                    f"Error downloading image: {str(e)}. Ensure the URL contains a downloadable image (e.g., Instagram post)."
                 )
-                os.remove("image.jpg") if os.path.exists("image.jpg") else None
+                for file in os.listdir():
+                    if file.startswith("image.") and file.endswith((".jpg", ".png", ".jpeg")):
+                        os.remove(file)
                 del context.bot_data[request_id]
                 await show_menu(update, context, query)
 
@@ -726,6 +739,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "no-check-certificate": True,
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                 "geo_bypass": True,
+                "no_playlist": True,
+                "retries": 3,
             }
             start_time = time.time()
             timeout = 30  # seconds
@@ -796,7 +811,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error downloading video: {e}")
             await query.message.reply_text(
-                f"Error downloading video: {str(e)}. Try a lower quality or a different platform."
+                f"Error downloading video: {str(e)}. Try a lower quality or a different platform (e.g., Vimeo, Twitter)."
             )
             os.remove("video.mp4") if os.path.exists("video.mp4") else None
             with get_db_connection() as conn:
@@ -829,6 +844,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "no-check-certificate": True,
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                 "geo_bypass": True,
+                "no_playlist": True,
+                "retries": 3,
             }
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -866,6 +883,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "no-check-certificate": True,
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
                 "geo_bypass": True,
+                "no_playlist": True,
+                "retries": 3,
             }
             start_time = time.time()
             timeout = 30  # seconds
