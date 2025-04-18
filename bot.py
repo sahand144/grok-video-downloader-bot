@@ -1,183 +1,172 @@
 import os
 import logging
+import tempfile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 import yt_dlp
 import psycopg2
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
-                          CallbackQueryHandler, ContextTypes, filters)
 from dotenv import load_dotenv
-from urllib.parse import urlparse
 
 load_dotenv()
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Database setup
-def log_download(user_id, video_url, selected_quality):
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS logs (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                video_url TEXT,
-                selected_quality TEXT,
-                timestamp TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
-        cur.execute("INSERT INTO logs (user_id, video_url, selected_quality) VALUES (%s, %s, %s);",
-                    (user_id, video_url, selected_quality))
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.error(f"DB Error: {e}")
+# Logging setup
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Start/Menu
+# Connect to PostgreSQL
+conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+cur = conn.cursor()
+cur.execute("""CREATE TABLE IF NOT EXISTS downloads (
+    user_id BIGINT,
+    video_url TEXT,
+    selected_quality TEXT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)""")
+conn.commit()
+
+
+# /start and menu
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_menu(update, context, welcome=True)
+    await update.message.reply_text("👋 Welcome! Send a video link from YouTube, TikTok, Instagram, etc.")
+    await show_menu(update, context)
 
-async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, welcome=False):
-    keyboard = [[
-        InlineKeyboardButton("📥 Help", callback_data='help'),
-        InlineKeyboardButton("📜 History", callback_data='history')
-    ], [
-        InlineKeyboardButton("🗑 Clear History", callback_data='clearhistory')
-    ]]
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("📜 History", callback_data="history")],
+        [InlineKeyboardButton("🧹 Clear History", callback_data="clearhistory")],
+        [InlineKeyboardButton("ℹ️ Help", callback_data="help")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    message = "Welcome! Send me a video link from any platform to get started." if welcome else "Choose an option below:"
-    await update.message.reply_text(message, reply_markup=reply_markup)
+    await update.message.reply_text("Choose an action:", reply_markup=reply_markup)
 
-# Handle inline menu clicks
-async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_menu(update, context)
+
+
+# /help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Just send me a video link, and I’ll give you download options!")
+
+
+# Handle button clicks
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
 
-    if data == 'help':
-        await query.edit_message_text("Send any video link (YouTube, TikTok, Twitter, etc.) and I’ll let you download it in your chosen quality. Videos >50MB will give you a link or option to split.")
-    elif data == 'history':
-        user_id = query.from_user.id
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("SELECT video_url, selected_quality, timestamp FROM logs WHERE user_id=%s ORDER BY timestamp DESC LIMIT 5;", (user_id,))
+    if query.data == "history":
+        cur.execute("SELECT video_url, selected_quality FROM downloads WHERE user_id=%s ORDER BY timestamp DESC LIMIT 5", (query.from_user.id,))
         rows = cur.fetchall()
         if rows:
-            text = "🕘 Your recent downloads:\n\n" + "\n".join([f"- {url} ({q})" for url, q, t in rows])
+            message = "\n".join([f"{url} ({quality})" for url, quality in rows])
         else:
-            text = "You have no recent downloads."
-        cur.close()
-        conn.close()
-        await query.edit_message_text(text)
-    elif data == 'clearhistory':
-        user_id = query.from_user.id
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM logs WHERE user_id=%s;", (user_id,))
-        conn.commit()
-        cur.close()
-        conn.close()
-        await query.edit_message_text("✅ History cleared.")
+            message = "No history found."
+        await query.edit_message_text(f"📜 Your recent downloads:\n{message}")
 
-# Handle video URL
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
+    elif query.data == "clearhistory":
+        cur.execute("DELETE FROM downloads WHERE user_id=%s", (query.from_user.id,))
+        conn.commit()
+        await query.edit_message_text("✅ Your history has been cleared.")
+
+    elif query.data == "help":
+        await query.edit_message_text("Send me any video URL and I’ll let you choose a quality to download!")
+
+
+# Handle URLs
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text
     user_id = update.message.from_user.id
+
+    ydl_opts = {"quiet": True, "skip_download": True}
     try:
-        ydl_opts = {"quiet": True, "skip_download": True}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            formats = info.get("formats", [])
-            video_options = [f for f in formats if f.get("vcodec") != "none"]
-
+            formats = sorted(info.get("formats", []), key=lambda f: f.get("height", 0), reverse=True)
             buttons = []
-            context.user_data['download_options'] = {}
+            seen = set()
 
-            for f in video_options:
+            for f in formats:
                 height = f.get("height")
                 ext = f.get("ext")
-                fmt_id = f.get("format_id")
-                filesize = f.get("filesize", 0)
-                if height and ext and fmt_id:
-                    label = f"{height}p ({ext})"
-                    buttons.append([InlineKeyboardButton(label, callback_data=f"dl_{fmt_id}")])
-                    context.user_data['download_options'][fmt_id] = {
-                        'url': url,
-                        'filesize': filesize,
-                        'label': label
-                    }
+                if not height or (height in seen):
+                    continue
+                seen.add(height)
+                label = f"{height}p ({ext})"
+                buttons.append([InlineKeyboardButton(label, callback_data=f"{url}|{f['format_id']}")])
 
-            if not buttons:
-                await update.message.reply_text("No downloadable video found in the link.")
-                return
-
-            reply_markup = InlineKeyboardMarkup(buttons)
-            await update.message.reply_text("Select a quality:", reply_markup=reply_markup)
-
+            reply_markup = InlineKeyboardMarkup(buttons[:5])
+            await update.message.reply_text("Choose video quality:", reply_markup=reply_markup)
+            context.user_data["video_url"] = url
     except Exception as e:
-        logger.error(e)
-        await update.message.reply_text("❌ Could not process the video. Make sure it's a valid public link.")
+        logger.error(str(e))
+        await update.message.reply_text("❌ Failed to fetch video. Please check the link and try again.")
 
-# Handle video download after quality selection
-async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# Download video after quality is selected
+async def quality_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    fmt_id = query.data.split("_")[1]
-    option = context.user_data['download_options'].get(fmt_id)
-    user_id = query.from_user.id
-
-    if not option:
-        await query.edit_message_text("Download option expired. Please send the link again.")
-        return
-
-    url = option['url']
-    filesize = option['filesize'] or 0
-    label = option['label']
-
-    filename = f"video_{user_id}.mp4"
 
     try:
+        data = query.data.split("|")
+        if len(data) != 2:
+            return
+
+        url, format_id = data
+        user_id = query.from_user.id
+
+        # Save interaction
+        cur.execute("INSERT INTO downloads (user_id, video_url, selected_quality) VALUES (%s, %s, %s)",
+                    (user_id, url, format_id))
+        conn.commit()
+
         ydl_opts = {
-            'format': fmt_id,
-            'outtmpl': filename,
-            'quiet': True
+            "quiet": True,
+            "format": format_id,
+            "outtmpl": tempfile.gettempdir() + "/%(title)s.%(ext)s"
         }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=True)
+            filepath = ydl.prepare_filename(info)
 
-        log_download(user_id, url, label)
+        file_size = os.path.getsize(filepath)
 
-        if os.path.getsize(filename) <= 50 * 1024 * 1024:
-            await query.message.reply_video(video=open(filename, 'rb'))
+        if file_size < 50 * 1024 * 1024:
+            await query.message.reply_video(video=open(filepath, "rb"))
         else:
             keyboard = [
-                [InlineKeyboardButton("📎 Get Direct Download Link", url=f"https://transfer.sh/{filename}")]
+                [InlineKeyboardButton("📂 Send Direct Link", url=info.get("url"))],
+                [InlineKeyboardButton("🧩 Split into Parts", callback_data="split|"+filepath)]
             ]
-            await query.message.reply_text("⚠️ The video is larger than 50MB. Choose an option:", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.message.reply_text("The file is too large for Telegram. Choose an option:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     except Exception as e:
-        logger.error(f"Download error: {e}")
-        await query.message.reply_text("❌ Download failed. Try another quality or link.")
-    finally:
-        if os.path.exists(filename):
-            os.remove(filename)
+        logger.error(str(e))
+        await query.message.reply_text("❌ An error occurred while downloading.")
 
-# Main function
-async def main():
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("menu", send_menu))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(handle_button, pattern='^(help|history|clearhistory)$'))
-    application.add_handler(CallbackQueryHandler(download_video, pattern='^dl_'))
-    await application.run_polling()
 
+# Start the bot
 if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu_command))
+    application.add_handler(CommandHandler("help", help_command))
+
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(history|clearhistory|help)$"))
+    application.add_handler(CallbackQueryHandler(quality_selected, pattern=r"^https?://.+\|.+$"))
+
+    application.run_polling()
