@@ -1,16 +1,16 @@
 import unittest
-from bot import validate_url, get_platform
+from telegram import InlineKeyboardButton
+from bot import build_quality_buttons
 
-class TestBotFunctions(unittest.TestCase):
-    def test_validate_url(self):
-        self.assertTrue(validate_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
-        self.assertTrue(validate_url("https://www.instagram.com/p/Cz9yZx9vL2Q/"))
-        self.assertFalse(validate_url("https://example.com"))
+class TestTelegramVideoBot(unittest.TestCase):
+    def test_quality_buttons_structure(self):
+        formats = [
+            {"format_id": "18", "ext": "mp4", "format_note": "360p"},
+            {"format_id": "22", "ext": "mp4", "format_note": "720p"},
+        ]
+        buttons = build_quality_buttons(formats, "test_url")
+        self.assertTrue(all(isinstance(b[0], InlineKeyboardButton) for b in buttons))
+        self.assertIn("720p", buttons[1][0].text)
 
-    def test_get_platform(self):
-        self.assertEqual(get_platform("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), "youtube")
-        self.assertEqual(get_platform("https://www.instagram.com/p/Cz9yZx9vL2Q/"), "instagram")
-        self.assertEqual(get_platform("https://example.com"), "unknown")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()
