@@ -14,6 +14,7 @@ from yt_dlp import YoutubeDL
 from dotenv import load_dotenv
 import ffmpeg
 import math
+import uuid
 
 # Enable logging
 logging.basicConfig(
@@ -94,9 +95,18 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             conn.commit()
 
+    # Generate a unique request ID
+    request_id = str(uuid.uuid4())
+    context.bot_data[request_id] = {"video_url": video_url, "user_id": user_id}
+
     # Fetch video info with yt-dlp
     try:
-        ydl_opts = {"quiet": True, "format": "best"}
+        ydl_opts = {
+            "quiet": True,
+            "format": "best",
+            "no-check-certificate": True,  # For Instagram and other platforms
+            "cookiefile": None,  # No cookies for public access
+        }
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
             formats = info.get("formats", [])
@@ -107,28 +117,36 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if f.get("vcodec") != "none" and f.get("resolution") and f.get("url")
         ]
         if not video_formats:
-            await update.message.reply_text("No downloadable video formats found. Please try another URL.")
+            await update.message.reply_text("No downloadable video formats found. The video may be private or restricted. Please try another URL.")
+            del context.bot_data[request_id]
             return
 
         # Create inline buttons for quality selection
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    f.get("resolution", "Unknown"),
-                    callback_data=f"quality|{video_url}|{f.get('format_id')}"
-                )
-            ]
-            for f in video_formats
-        ]
+        keyboard = []
+        for i, f in enumerate(video_formats):
+            resolution = f.get("resolution", "Unknown")
+            format_id = f.get("format_id", str(i))
+            callback_data = f"quality|{request_id}|{format_id}"
+            if len(callback_data.encode('utf-8')) > 64:
+                logger.warning(f"Callback data too long for format {format_id}")
+                continue
+            keyboard.append([InlineKeyboardButton(resolution, callback_data=callback_data)])
+        
+        if not keyboard:
+            await update.message.reply_text("No valid video formats available due to data constraints. Please try another URL.")
+            del context.bot_data[request_id]
+            return
+
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
             "Please select a video quality:", reply_markup=reply_markup
         )
 
     except Exception as e:
-        logger.error(f"Error processing URL: {e}")
+        logger.error(f"Error processing URL {video_url}: {e}")
         error_msg = f"Sorry, I couldn't process that URL. Error: {str(e)}. Please try another URL."
         await update.message.reply_text(error_msg)
+        del context.bot_data[request_id]
 
 # Handle quality selection and large file options
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -140,7 +158,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = data[0]
 
     if action == "quality":
-        video_url, format_id = data[1], data[2]
+        request_id, format_id = data[1], data[2]
+        if request_id not in context.bot_data:
+            await query.message.reply_text("Session expired. Please send the URL again.")
+            return
+
+        video_url = context.bot_data[request_id]["video_url"]
 
         # Log selected quality
         with get_db_connection() as conn:
@@ -161,6 +184,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "format": format_id,
                 "outtmpl": "video.%(ext)s",
                 "quiet": True,
+                "no-check-certificate": True,
             }
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
@@ -174,6 +198,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not video_file:
                 await query.message.reply_text("Error: Video file not found.")
+                del context.bot_data[request_id]
                 return
 
             file_size = os.path.getsize(video_file) / (1024 * 1024)  # Size in MB
@@ -187,11 +212,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [
                         InlineKeyboardButton(
                             "Direct Download Link",
-                            callback_data=f"link|{video_url}|{format_id}"
+                            callback_data=f"link|{request_id}|{format_id}"
                         ),
                         InlineKeyboardButton(
                             "Split into Parts",
-                            callback_data=f"split|{video_url}|{format_id}"
+                            callback_data=f"split|{request_id}|{format_id}"
                         ),
                     ]
                 ]
@@ -207,11 +232,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(
                 f"Sorry, there was an error downloading the video. Error: {str(e)}. Please try another URL."
             )
+            del context.bot_data[request_id]
 
     elif action == "link":
-        video_url, format_id = data[1], data[2]
+        request_id, format_id = data[1], data[2]
+        if request_id not in context.bot_data:
+            await query.message.reply_text("Session expired. Please send the URL again.")
+            return
+
+        video_url = context.bot_data[request_id]["video_url"]
         try:
-            ydl_opts = {"quiet": True}
+            ydl_opts = {"quiet": True, "no-check-certificate": True}
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
                 for f in info.get("formats", []):
@@ -225,14 +256,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(
                 f"Error fetching download link: {str(e)}. Please try another URL."
             )
+        finally:
+            del context.bot_data[request_id]
 
     elif action == "split":
-        video_url, format_id = data[1], data[2]
+        request_id, format_id = data[1], data[2]
+        if request_id not in context.bot_data:
+            await query.message.reply_text("Session expired. Please send the URL again.")
+            return
+
+        video_url = context.bot_data[request_id]["video_url"]
         try:
             ydl_opts = {
                 "format": format_id,
                 "outtmpl": "video.%(ext)s",
                 "quiet": True,
+                "no-check-certificate": True,
             }
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
@@ -245,6 +284,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not video_file:
                 await query.message.reply_text("Error: Video file not found.")
+                del context.bot_data[request_id]
                 return
 
             # Split video into parts (each <50 MB)
@@ -275,6 +315,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(
                 f"Error splitting video: {str(e)}. Please try another URL or choose a direct link."
             )
+        finally:
+            del context.bot_data[request_id]
 
 def main():
     # Initialize database
